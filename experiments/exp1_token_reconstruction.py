@@ -163,6 +163,11 @@ def apply_control(tokens: torch.Tensor, control: str, seed: int) -> torch.Tensor
         return tokens
     if control == "zero":
         return torch.zeros_like(tokens)
+    if control == "frame_shuffle":
+        if tokens.shape[0] < 2:
+            return tokens
+        permutation = torch.randperm(tokens.shape[0], generator=generator)
+        return tokens[permutation]
     if control != "shuffle":
         raise ValueError(f"Unknown control: {control}")
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -414,7 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--image_folder", required=True)
     extract.add_argument("--output_dir", required=True)
     extract.add_argument("--source", choices=("local", "global_0", "global_1", "global_2", "global_3"), default="local")
-    extract.add_argument("--control", choices=("none", "zero", "shuffle"), default="none")
+    extract.add_argument("--control", choices=("none", "zero", "shuffle", "frame_shuffle"), default="none")
     extract.add_argument("--layer", type=int, default=23)
     extract.add_argument("--first_k", type=int, default=None)
     extract.add_argument("--stride", type=int, default=1)
