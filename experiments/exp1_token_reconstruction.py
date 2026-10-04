@@ -178,13 +178,14 @@ def apply_control(tokens: torch.Tensor, control: str, seed: int) -> torch.Tensor
     return shuffled
 
 
-def capture_local_tokens(model: nn.Module, layer: int):
+def capture_block_tokens(model: nn.Module, block_group: str, layer: int):
     captured: dict[str, torch.Tensor] = {}
 
     def hook(_module, _inputs, output):
         captured["tokens"] = output.detach()
 
-    handle = model.aggregator.frame_blocks[layer].register_forward_hook(hook)
+    blocks = getattr(model.aggregator, block_group)
+    handle = blocks[layer].register_forward_hook(hook)
     return captured, handle
 
 
@@ -202,9 +203,16 @@ def extract(args: argparse.Namespace) -> None:
     model = build_model(args, device)
 
     if args.source == "local":
-        if args.layer < 0 or args.layer >= len(model.aggregator.frame_blocks):
-            raise ValueError(f"layer must be in [0, {len(model.aggregator.frame_blocks) - 1}]")
-        captured, hook_handle = capture_local_tokens(model, args.layer)
+        blocks_name = "frame_blocks"
+    elif args.source == "gca":
+        blocks_name = "global_blocks"
+    else:
+        blocks_name = None
+    if blocks_name is not None:
+        blocks = getattr(model.aggregator, blocks_name)
+        if args.layer < 0 or args.layer >= len(blocks):
+            raise ValueError(f"layer must be in [0, {len(blocks) - 1}]")
+        captured, hook_handle = capture_block_tokens(model, blocks_name, args.layer)
     else:
         captured, hook_handle = None, None
 
@@ -227,7 +235,7 @@ def extract(args: argparse.Namespace) -> None:
             num_frame_for_scale=num_scale,
             num_frame_per_block=end - start,
         )
-        if args.source == "local":
+        if args.source in ("local", "gca"):
             if "tokens" not in captured:
                 raise RuntimeError("The local frame-block hook did not capture tokens")
             source_tokens = captured["tokens"]
@@ -418,7 +426,11 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--model_path", required=True)
     extract.add_argument("--image_folder", required=True)
     extract.add_argument("--output_dir", required=True)
-    extract.add_argument("--source", choices=("local", "global_0", "global_1", "global_2", "global_3"), default="local")
+    extract.add_argument(
+        "--source",
+        choices=("local", "gca", "global_0", "global_1", "global_2", "global_3"),
+        default="local",
+    )
     extract.add_argument("--control", choices=("none", "zero", "shuffle", "frame_shuffle"), default="none")
     extract.add_argument("--layer", type=int, default=23)
     extract.add_argument("--first_k", type=int, default=None)

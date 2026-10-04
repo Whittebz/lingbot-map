@@ -13,12 +13,13 @@ The RGB decoder is not used for inference timing.
 ## Conditions
 
 - `local`: capture the output of one `frame_blocks[layer]` before global attention.
+- `gca`: capture the output of one `global_blocks[layer]` after GCA attention.
 - `global_0`, `global_1`, `global_2`, `global_3`: use the four token outputs returned by the official aggregator.
 - `zero`: replace patch tokens with zeros. This is a negative control.
 - `shuffle`: shuffle patch positions within each frame. This is a spatial control.
 - `frame_shuffle`: exchange complete frame token sets. This is a temporal control.
 
-Start with `local` and `global_3`. Add `zero` and `shuffle` after the pipeline passes.
+Start with `local`, `gca`, and `global_3`. Add `zero` and `shuffle` after the pipeline passes.
 
 ## Remote workflow
 
