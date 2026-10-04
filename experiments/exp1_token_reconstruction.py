@@ -159,6 +159,7 @@ class TokenFrameDataset(Dataset):
 
 
 def apply_control(tokens: torch.Tensor, control: str, seed: int) -> torch.Tensor:
+    generator = torch.Generator(device="cpu").manual_seed(seed)
     if control == "none":
         return tokens
     if control == "zero":
@@ -170,7 +171,6 @@ def apply_control(tokens: torch.Tensor, control: str, seed: int) -> torch.Tensor
         return tokens[permutation]
     if control != "shuffle":
         raise ValueError(f"Unknown control: {control}")
-    generator = torch.Generator(device="cpu").manual_seed(seed)
     shuffled = tokens.clone()
     for frame_idx in range(tokens.shape[0]):
         permutation = torch.randperm(tokens.shape[1], generator=generator)
