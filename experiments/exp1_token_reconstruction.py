@@ -239,7 +239,17 @@ def extract(args: argparse.Namespace) -> None:
             if "tokens" not in captured:
                 raise RuntimeError("The local frame-block hook did not capture tokens")
             source_tokens = captured["tokens"]
-            source_tokens = source_tokens.view(1, end - start, source_tokens.shape[1], source_tokens.shape[2])
+            if source_tokens.shape[0] == 1:
+                # GCA blocks operate on [B, S*P, C].
+                patch_count = source_tokens.shape[1] // (end - start)
+                source_tokens = source_tokens.view(
+                    1, end - start, patch_count, source_tokens.shape[2]
+                )
+            else:
+                # Frame blocks operate on [B*S, P, C].
+                source_tokens = source_tokens.view(
+                    1, end - start, source_tokens.shape[1], source_tokens.shape[2]
+                )
             source_tokens = source_tokens[0, :, patch_start_idx:]
         else:
             source_index = int(args.source.split("_")[1])
