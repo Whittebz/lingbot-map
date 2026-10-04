@@ -236,6 +236,13 @@ def extract(args: argparse.Namespace) -> None:
 
         source_tokens = apply_control(source_tokens.float().cpu(), args.control, args.seed + window_idx)
         target_images = images[start:end].cpu()
+        patch_h = target_images.shape[-2] // args.patch_size
+        patch_w = target_images.shape[-1] // args.patch_size
+        if patch_h * patch_w != source_tokens.shape[1]:
+            raise RuntimeError(
+                f"Patch grid mismatch: target={patch_h}x{patch_w}, "
+                f"tokens={source_tokens.shape[1]}"
+            )
         file_path = output_dir / f"window_{window_idx:04d}.pt"
         torch.save(
             {
@@ -245,6 +252,8 @@ def extract(args: argparse.Namespace) -> None:
                 "end": end,
                 "source": args.source,
                 "control": args.control,
+                "patch_h": patch_h,
+                "patch_w": patch_w,
                 "patch_start_idx": int(patch_start_idx),
                 "image_paths": paths[start:end],
             },
@@ -301,13 +310,16 @@ def split_files(data_dir: str, val_fraction: float) -> tuple[list[Path], list[Pa
     return files[:split], files[split:]
 
 
-def make_decoder(dataset: TokenFrameDataset) -> RGBDecoder:
+def make_decoder(dataset: TokenFrameDataset, patch_size: int) -> tuple[RGBDecoder, tuple[int, int]]:
     _, patch_count, input_dim = dataset.token_shape
     _, _, height, width = dataset.image_shape
-    patch_size = int((patch_count) ** 0.5)
-    if patch_size * patch_size != patch_count:
-        raise ValueError(f"Patch count {patch_count} is not square")
-    return RGBDecoder(input_dim, patch_size, patch_size), (height, width)
+    patch_h, patch_w = height // patch_size, width // patch_size
+    if patch_h * patch_w != patch_count:
+        raise ValueError(
+            f"Patch grid mismatch: image={height}x{width}, patch_size={patch_size}, "
+            f"tokens={patch_count}"
+        )
+    return RGBDecoder(input_dim, patch_h, patch_w), (height, width)
 
 
 def run_epoch(
@@ -353,7 +365,7 @@ def train_or_eval(args: argparse.Namespace, evaluate_only: bool) -> None:
     train_files, val_files = split_files(args.data_dir, args.val_fraction)
     train_set = TokenFrameDataset(train_files)
     val_set = TokenFrameDataset(val_files)
-    decoder, _ = make_decoder(train_set)
+    decoder, _ = make_decoder(train_set, args.patch_size)
     decoder.to(device)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -425,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--checkpoint", default=None)
         command.add_argument("--val_fraction", type=float, default=0.25)
         command.add_argument("--batch_size", type=int, default=1)
+        command.add_argument("--patch_size", type=int, default=14)
         command.add_argument("--epochs", type=int, default=10)
         command.add_argument("--learning_rate", type=float, default=1e-4)
         command.add_argument("--max_steps", type=int, default=None)
