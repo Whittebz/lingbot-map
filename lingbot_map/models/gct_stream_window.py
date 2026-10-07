@@ -536,7 +536,7 @@ class GCTStream(GCTBase):
         )
 
         # Initialize output lists with scale frame predictions (offload if needed)
-        all_pose_enc = [_to_out(scale_output["pose_enc"])]
+        all_pose_enc = [_to_out(scale_output["pose_enc"])] if "pose_enc" in scale_output else []
         all_depth = [_to_out(scale_output["depth"])] if "depth" in scale_output else []
         all_depth_conf = [_to_out(scale_output["depth_conf"])] if "depth_conf" in scale_output else []
         all_world_points = [_to_out(scale_output["world_points"])] if "world_points" in scale_output else []
