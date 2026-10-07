@@ -639,8 +639,10 @@ class GCTStream(GCTBase):
 
         # Concatenate all predictions along sequence dimension
         predictions = {
-            "pose_enc": torch.cat(all_pose_enc, dim=1),
+            
         }
+        if all_pose_enc:
+            predictions["pose_enc"] = torch.cat(all_pose_enc, dim=1)
         del all_pose_enc
         if all_depth:
             predictions["depth"] = torch.cat(all_depth, dim=1)
