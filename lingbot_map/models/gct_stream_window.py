@@ -614,7 +614,7 @@ class GCTStream(GCTBase):
                 if not is_keyframe:
                     self._set_skip_append(False)
 
-            all_pose_enc.append(_to_out(frame_output["pose_enc"]))
+            if "pose_enc" in frame_output: all_pose_enc.append(_to_out(frame_output["pose_enc"]))
             if "depth" in frame_output:
                 all_depth.append(_to_out(frame_output["depth"]))
             if "depth_conf" in frame_output:
