@@ -12,6 +12,7 @@ import os
 import math
 import warnings
 import torch
+from lingbot_map.probe_scope import scope as probe_scope
 
 from torch import Tensor
 from torch import nn
@@ -475,22 +476,24 @@ class FlashInferAttention(Attention):
             if is_multi_frame:
                 # Phase 1: compute full self-attention via SDPA (all frames attend to each other),
                 # then append each frame's K/V to the paged cache one at a time.
-                qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-                q, k, v = qkv.unbind(0)
-                q, k = self.q_norm(q), self.k_norm(k)
+                with probe_scope("GCA_QKV_RoPE"):
+                    qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+                    q, k, v = qkv.unbind(0)
+                    q, k = self.q_norm(q), self.k_norm(k)
 
-                # Apply RoPE before caching (RoPE baked into K before append)
-                if self.rope is not None and not enable_3d_rope:
-                    q = self.rope(q, pos)
-                    k = self.rope(k, pos)
-                elif self.rope is not None and enable_3d_rope:
-                    q = apply_rotary_emb(q, pos)
-                    k = apply_rotary_emb(k, pos)
+                    # Apply RoPE before caching (RoPE baked into K before append)
+                    if self.rope is not None and not enable_3d_rope:
+                        q = self.rope(q, pos)
+                        k = self.rope(k, pos)
+                    elif self.rope is not None and enable_3d_rope:
+                        q = apply_rotary_emb(q, pos)
+                        k = apply_rotary_emb(k, pos)
 
-                x = F.scaled_dot_product_attention(
-                    q, k, v,
-                    dropout_p=self.attn_drop.p if self.training else 0.0,
-                )
+                with probe_scope("GCA_Scale_SDPA"):
+                    x = F.scaled_dot_product_attention(
+                        q, k, v,
+                        dropout_p=self.attn_drop.p if self.training else 0.0,
+                    )
                 x = x.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
 
                 # Append each frame's K/V to the paged cache individually.

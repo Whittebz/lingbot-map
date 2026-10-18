@@ -12,6 +12,7 @@ Subclasses implement mode-specific attention logic.
 
 import logging
 import torch
+from lingbot_map.probe_scope import scope as probe_scope
 import torch.nn as nn
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List
@@ -365,7 +366,8 @@ class AggregatorBase(nn.Module, ABC):
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
         # Normalize images
-        images = (images - self._resnet_mean) / self._resnet_std
+        with probe_scope("Normalize_Images"):
+            images = (images - self._resnet_mean) / self._resnet_std
 
         # No CP slicing: S_local == S_global
         S_local = S
@@ -381,14 +383,15 @@ class AggregatorBase(nn.Module, ABC):
 
         _, P_patch, C = patch_tokens.shape
 
-        # Prepare special tokens
-        special_tokens = self._prepare_special_tokens(
-            B, S_local, S_global, C,
-            num_frame_for_scale=num_frame_for_scale
-        )
+        with probe_scope("Special_Token_Concat"):
+            # Prepare special tokens
+            special_tokens = self._prepare_special_tokens(
+                B, S_local, S_global, C,
+                num_frame_for_scale=num_frame_for_scale
+            )
 
-        # Concatenate special tokens + patch tokens
-        tokens = torch.cat([special_tokens, patch_tokens], dim=1)
+            # Concatenate special tokens + patch tokens
+            tokens = torch.cat([special_tokens, patch_tokens], dim=1)
 
         _, P, C = tokens.shape
 
