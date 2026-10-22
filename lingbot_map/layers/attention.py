@@ -73,7 +73,32 @@ class Attention(nn.Module):
             q = self.rope(q, pos)
             k = self.rope(k, pos)
 
-        if self.fused_attn:
+        from lingbot_map.layers.attention_intervention import selection_for_site_row
+        selections = [
+            selection_for_site_row("frame", row, N, device=x.device)
+            for row in range(B)
+        ]
+        if any(selection is not None for selection in selections):
+            outputs = []
+            for row, selection in enumerate(selections):
+                if selection is None:
+                    q_row, k_row, v_row = q[row:row+1], k[row:row+1], v[row:row+1]
+                else:
+                    special_indices, image_indices, _ = selection
+                    kv_indices = torch.cat((special_indices, image_indices))
+                    q_row = q[row:row+1]
+                    k_row = k[row:row+1].index_select(2, kv_indices)
+                    v_row = v[row:row+1].index_select(2, kv_indices)
+                if self.fused_attn:
+                    outputs.append(F.scaled_dot_product_attention(
+                        q_row, k_row, v_row,
+                        dropout_p=self.attn_drop.p if self.training else 0.0))
+                else:
+                    q_row = q_row * self.scale
+                    weights = (q_row @ k_row.transpose(-2, -1)).softmax(dim=-1)
+                    outputs.append(self.attn_drop(weights) @ v_row)
+            x = torch.cat(outputs, dim=0)
+        elif self.fused_attn:
             x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
         else:
             q = q * self.scale

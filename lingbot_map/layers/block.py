@@ -254,16 +254,38 @@ class FlashInferBlock(nn.Module):
             # it stays clean), attend, and then roll back the append.  Mirrors
             # the ``skip_append`` behavior of the SDPA dict path.
             skip_append = getattr(manager, '_skip_append', False)
+            from lingbot_map.layers.attention_intervention import active_selection
+            selection = active_selection(
+                "global", global_idx, manager.frame_count[global_idx],
+                manager.num_special_tokens, k_nhd.shape[0] - manager.num_special_tokens,
+                device=k_nhd.device
+            )
+            selected_patch_ids = None if selection is None else selection[1] - manager.num_special_tokens
+            retain_selected = selection is not None and selection[2].retain_in_cache
             if skip_append:
                 prev_defer = manager._defer_eviction
                 manager._defer_eviction = True
-                manager.append_frame(global_idx, k_nhd, v_nhd)
+                page_id = manager.append_frame(
+                    global_idx, k_nhd, v_nhd,
+                    patch_indices=selected_patch_ids if retain_selected else None
+                )
+                if selection is not None and not retain_selected:
+                    manager.set_current_read_subset(global_idx, page_id, selected_patch_ids)
                 attn_x = manager.compute_attention(global_idx, q_nhd)
+                if selection is not None:
+                    selection[2].visible_kv_token_count = manager.last_attention_token_count[global_idx]
+                    selection[2].attention_read_token_count = manager.last_attention_token_count[global_idx]
                 manager.rollback_last_frame(global_idx)
                 manager._defer_eviction = prev_defer
             else:
-                # Eager: write frame K/V to paged cache
-                manager.append_frame(global_idx, k_nhd, v_nhd)
+                # Keep the original frame page and eviction policy; only its valid
+                # prefix changes for current_and_cache interventions.
+                page_id = manager.append_frame(
+                    global_idx, k_nhd, v_nhd,
+                    patch_indices=selected_patch_ids if retain_selected else None
+                )
+                if selection is not None and not retain_selected:
+                    manager.set_current_read_subset(global_idx, page_id, selected_patch_ids)
                 # CPU-only: update eviction state (deque ops, no GPU kernel)
                 manager.evict_frames(
                     block_idx=global_idx,
@@ -276,6 +298,9 @@ class FlashInferBlock(nn.Module):
                 )
                 # Eager: FlashInfer BatchPrefillWithPagedKVCacheWrapper
                 attn_x = manager.compute_attention(global_idx, q_nhd)
+                if selection is not None:
+                    selection[2].visible_kv_token_count = manager.last_attention_token_count[global_idx]
+                    selection[2].attention_read_token_count = manager.last_attention_token_count[global_idx]
 
             # [tpf, H, D] -> [B, tpf, C]  (B=1 in streaming, contiguous from FlashInfer output)
             attn_x = attn_x.reshape(x.shape[0], q_nhd.shape[0],

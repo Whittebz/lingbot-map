@@ -483,6 +483,10 @@ class AggregatorBase(nn.Module, ABC):
             pos = pos.view(B * S, P, 2)
 
         intermediates = []
+        from lingbot_map.layers.attention_intervention import intervention_site
+        frame_base = getattr(self, "_intervention_frame_base", 0)
+        frame_ids = tuple(frame_base + (row % S) for row in range(B * S))
+        grid_size = getattr(self, "_intervention_grid_size", None)
 
         # Process blocks
         for i in range(self.aa_block_size):
@@ -495,7 +499,8 @@ class AggregatorBase(nn.Module, ABC):
                     use_reentrant=self.use_reentrant
                 )
             else:
-                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+                with intervention_site("frame", frame_idx, frame_ids, self.num_special_tokens, grid_size):
+                    tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
 
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
@@ -564,6 +569,8 @@ class AggregatorBase(nn.Module, ABC):
                 patch_start_idx: Index where patch tokens start
         """
         B, S_input, _, H, W = images.shape
+        self._intervention_frame_base = getattr(self, "total_frames_processed", 0)
+        self._intervention_grid_size = (H // self.patch_size, W // self.patch_size)
 
         # Embed images
         tokens, B, S_local, S_global, P, C = self._embed_images(

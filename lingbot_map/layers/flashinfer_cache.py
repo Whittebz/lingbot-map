@@ -168,6 +168,11 @@ class FlashInferKVCacheManager:
 
         # Frame counter per block (determines scale vs window routing)
         self.frame_count: List[int] = [0] * num_blocks
+        self.patch_valid_counts: List[dict] = [dict() for _ in range(num_blocks)]
+        self._read_patch_override = {}
+        self._scratch_kv_caches = {}
+        self._planned_signature = None
+        self.last_attention_token_count = {}
 
         # Deferred eviction support for flow-based keyframe selection.
         # When True, evict_frames() becomes a no-op; caller must later call
@@ -199,7 +204,7 @@ class FlashInferKVCacheManager:
     # Public API  (drop-in compatible with previous FlashInferKVCacheManager)
     # =========================================================================
 
-    def append_frame(self, block_idx: int, k: Tensor, v: Tensor) -> None:
+    def append_frame(self, block_idx: int, k: Tensor, v: Tensor, patch_indices=None) -> int:
         """
         Append one frame's K/V tensors to the two-stream cache.
 
@@ -222,9 +227,16 @@ class FlashInferKVCacheManager:
             f"got {patch_k.shape[0]} (tokens_per_frame={k.shape[0]})"
         )
 
-        self._write_patch_page(block_idx, patch_k, patch_v)
+        if patch_indices is None:
+            patch_page = self._write_patch_page(block_idx, patch_k, patch_v)
+        else:
+            patch_indices = torch.as_tensor(patch_indices, dtype=torch.long, device=patch_k.device)
+            patch_page = self._write_patch_page(block_idx, patch_k.index_select(0, patch_indices),
+                                                patch_v.index_select(0, patch_indices),
+                                                valid_count=patch_indices.numel())
         self._write_special_tokens(block_idx, sp_k, sp_v)
         self.frame_count[block_idx] += 1
+        return patch_page
 
     def evict_frames(
         self,
@@ -251,6 +263,7 @@ class FlashInferKVCacheManager:
             return
         while len(self.live_window_patch_pages[block_idx]) > sliding_window:
             old_page = self.live_window_patch_pages[block_idx].popleft()
+            self.patch_valid_counts[block_idx].pop(old_page, None)
             self.free_patch_pages[block_idx].append(old_page)
 
     def execute_deferred_eviction(
@@ -263,6 +276,7 @@ class FlashInferKVCacheManager:
         """Run the eviction that was skipped while ``_defer_eviction`` was True."""
         while len(self.live_window_patch_pages[block_idx]) > sliding_window:
             old_page = self.live_window_patch_pages[block_idx].popleft()
+            self.patch_valid_counts[block_idx].pop(old_page, None)
             self.free_patch_pages[block_idx].append(old_page)
 
     def rollback_last_frame(self, block_idx: int) -> None:
@@ -282,6 +296,7 @@ class FlashInferKVCacheManager:
             page_id = self.live_window_patch_pages[block_idx].pop()
         else:
             page_id = self.scale_patch_pages[block_idx].pop()
+        self.patch_valid_counts[block_idx].pop(page_id, None)
         self.free_patch_pages[block_idx].append(page_id)
 
         # 2) Undo special tokens
@@ -369,56 +384,97 @@ class FlashInferKVCacheManager:
             # No KV present yet (should not occur in normal usage after append_frame)
             return torch.zeros_like(q)
 
+        override = self._read_patch_override.get(block_idx)
+        patch_pages = list(self.scale_patch_pages[block_idx]) + list(self.live_window_patch_pages[block_idx])
+        partial = any(self.patch_valid_counts[block_idx].get(pid, self.patches_per_frame) < self.patches_per_frame
+                      for pid in patch_pages)
+        self.last_attention_token_count[block_idx] = sum(
+            len_page for len_page in [
+                sum(self.patch_valid_counts[block_idx].get(pid, self.patches_per_frame)
+                    for pid in patch_pages),
+                self.special_token_count[block_idx],
+            ]
+        )
+        if (partial or override) and self.force_fp32:
+            raise RuntimeError("Sparse KV intervention requires FlashInfer; force_fp32 is incompatible")
+        compact = partial or override
         if self.force_fp32:
-            # ── fp32 gather+SDPA path ─────────────────────────────────────────
-            # Gather visible K/V from paged cache and run SDPA in fp32.
-            # This bypasses the FlashInfer FA2 kernel (fp16/bf16 only) for accuracy.
-            # q_len, H, D → 1, H, q_len, D  (SDPA expects BHsD layout)
             import torch.nn.functional as F_nn
             k_flat, v_flat = self._gather_kv(block_idx)
-            q_b = q.float().permute(1, 0, 2).unsqueeze(0)      # [1, H, q_len, D]
-            k_b = k_flat.float().permute(1, 0, 2).unsqueeze(0) # [1, H, kv_len, D]
-            v_b = v_flat.float().permute(1, 0, 2).unsqueeze(0) # [1, H, kv_len, D]
+            q_b = q.float().permute(1, 0, 2).unsqueeze(0)
+            k_b = k_flat.float().permute(1, 0, 2).unsqueeze(0)
+            v_b = v_flat.float().permute(1, 0, 2).unsqueeze(0)
             out = F_nn.scaled_dot_product_attention(q_b, k_b, v_b)
-            return out.squeeze(0).permute(1, 0, 2).to(q.dtype) # [q_len, H, D]
+            return out.squeeze(0).permute(1, 0, 2).to(q.dtype)
+        if compact:
+            page_count, last_len, cache = self._build_compacted_attention_pages(block_idx, override)
+            page_indices = list(range(page_count))
+        else:
+            page_indices = self.build_visible_page_table(block_idx)
+            last_len = self.compute_last_page_len(block_idx)
+            cache = self.kv_caches[block_idx]
+        signature = (tuple(page_indices), int(last_len), bool(compact), int(q.shape[0]))
+        if signature != self._planned_signature:
+            indices = torch.tensor(page_indices, dtype=torch.int32, device=self.device)
+            indptr = torch.tensor([0, len(page_indices)], dtype=torch.int32, device=self.device)
+            last_page = torch.tensor([last_len], dtype=torch.int32, device=self.device)
+            qo_indptr = torch.tensor([0, q.shape[0]], dtype=torch.int32, device=self.device)
+            self.prefill_wrapper.plan(qo_indptr, indptr, indices, last_page,
+                num_qo_heads=self.num_heads, num_kv_heads=self.num_heads,
+                head_dim_qk=self.head_dim, page_size=self.page_size, causal=False,
+                pos_encoding_mode="NONE", q_data_type=self.dtype)
+            self._planned_signature = signature
+        try:
+            return self.prefill_wrapper.run(q=q.to(self.dtype).contiguous(), paged_kv_cache=cache)
+        finally:
+            self._read_patch_override.pop(block_idx, None)
 
-        if block_idx == 0:
-            # ── Plan once per frame step ──────────────────────────────────────
-            # Build visible page table from block 0's state.
-            # All blocks have identical page structures, so this plan is valid
-            # for all subsequent run() calls (block_idx = 1, 2, ...).
-            visible  = self.build_visible_page_table(0)
-            last_len = self.compute_last_page_len(0)
+    def set_current_read_subset(self, block_idx: int, patch_page: int, patch_indices) -> None:
+        self._read_patch_override[block_idx] = (
+            patch_page, torch.as_tensor(patch_indices, dtype=torch.long, device=self.device))
 
-            assert visible, "visible page table is empty after append_frame"
-            assert 1 <= last_len <= self.page_size, (
-                f"block 0: last_page_len={last_len} out of [1, {self.page_size}]"
-            )
-
-            paged_kv_indices       = torch.tensor(visible, dtype=torch.int32, device=self.device)
-            paged_kv_indptr        = torch.tensor([0, len(visible)], dtype=torch.int32, device=self.device)
-            paged_kv_last_page_len = torch.tensor([last_len], dtype=torch.int32, device=self.device)
-
-            self.prefill_wrapper.plan(
-                self._qo_indptr,
-                paged_kv_indptr,
-                paged_kv_indices,
-                paged_kv_last_page_len,
-                num_qo_heads      = self.num_heads,
-                num_kv_heads      = self.num_heads,
-                head_dim_qk       = self.head_dim,
-                page_size         = self.page_size,
-                causal            = False,          # custom page ordering; no causal mask
-                pos_encoding_mode = "NONE",         # RoPE applied externally before append
-                q_data_type       = self.dtype,
-            )
-
-        # ── Run attention for this layer ──────────────────────────────────────
-        # Cast q to storage dtype (LayerNorm may upcast to float32 under autocast).
-        return self.prefill_wrapper.run(
-            q              = q.to(self.dtype).contiguous(),
-            paged_kv_cache = self.kv_caches[block_idx],
-        )  # → [q_len, H, D]
+    def _build_compacted_attention_pages(self, block_idx: int, override=None):
+        patch_pages = list(self.scale_patch_pages[block_idx]) + list(self.live_window_patch_pages[block_idx])
+        cache = self.kv_caches[block_idx]
+        parts_k, parts_v = [], []
+        for pid in patch_pages:
+            real_valid = self.patch_valid_counts[block_idx].get(pid, self.patches_per_frame)
+            if override is not None and pid == override[0]:
+                selected_k = cache[pid, 0].index_select(0, override[1])
+                selected_v = cache[pid, 1].index_select(0, override[1])
+                parts_k.append(selected_k)
+                parts_v.append(selected_v)
+            else:
+                parts_k.append(cache[pid, 0, :real_valid])
+                parts_v.append(cache[pid, 1, :real_valid])
+            # Preserve FA3's zero padding semantics for pages where page_size > P.
+            pad_count = self.page_size - self.patches_per_frame
+            if pad_count:
+                zero = torch.zeros((pad_count, self.num_heads, self.head_dim),
+                                   dtype=cache.dtype, device=cache.device)
+                parts_k.append(zero)
+                parts_v.append(zero)
+        special_pages = list(self.all_special_pages[block_idx])
+        special_tail = self.compute_last_page_len(block_idx) if special_pages else 0
+        for i, pid in enumerate(special_pages):
+            valid = special_tail if i == len(special_pages) - 1 else self.page_size
+            parts_k.append(cache[pid, 0, :valid])
+            parts_v.append(cache[pid, 1, :valid])
+        flat_k, flat_v = torch.cat(parts_k), torch.cat(parts_v)
+        total = flat_k.shape[0]
+        self.last_attention_token_count[block_idx] = total
+        page_count = (total + self.page_size - 1) // self.page_size
+        scratch = self._scratch_kv_caches.get(block_idx)
+        if scratch is None or scratch.shape[0] < page_count:
+            scratch = torch.empty((page_count, 2, self.page_size, self.num_heads, self.head_dim),
+                                  dtype=self.dtype, device=self.device)
+            self._scratch_kv_caches[block_idx] = scratch
+        for page in range(page_count):
+            lo, hi = page * self.page_size, min((page + 1) * self.page_size, total)
+            n = hi - lo
+            scratch[page, 0, :n].copy_(flat_k[lo:hi].to(self.dtype))
+            scratch[page, 1, :n].copy_(flat_v[lo:hi].to(self.dtype))
+        return page_count, ((total - 1) % self.page_size) + 1, scratch
 
     def reset(self) -> None:
         """Reset all per-block state for a new sequence."""
@@ -430,6 +486,11 @@ class FlashInferKVCacheManager:
             self.free_special_pages[i] = list(range(self.max_patch_pages, self.max_num_pages))
             self.special_token_count[i] = 0
             self.frame_count[i] = 0
+            self.patch_valid_counts[i].clear()
+            self._read_patch_override.pop(i, None)
+            self._scratch_kv_caches.pop(i, None)
+            self.last_attention_token_count.pop(i, None)
+        self._planned_signature = None
 
     # =========================================================================
     # Helper methods
@@ -471,7 +532,7 @@ class FlashInferKVCacheManager:
 
     # ── Internal write helpers ────────────────────────────────────────────────
 
-    def _write_patch_page(self, block_idx: int, patch_k: Tensor, patch_v: Tensor) -> int:
+    def _write_patch_page(self, block_idx: int, patch_k: Tensor, patch_v: Tensor, valid_count=None) -> int:
         """
         Allocate one free patch page and write patches_per_frame patch tokens.
 
@@ -501,8 +562,12 @@ class FlashInferKVCacheManager:
         # (rounded up for FA3 alignment, e.g. page_size=1024 for patches_per_frame=999),
         # positions patches_per_frame..page_size-1 remain zero (kv_caches is zero-init).
         P = self.patches_per_frame
-        self.kv_caches[block_idx][page_id, 0, :P] = patch_k  # K
-        self.kv_caches[block_idx][page_id, 1, :P] = patch_v  # V
+        valid_count = P if valid_count is None else int(valid_count)
+        if valid_count < 1 or valid_count > P:
+            raise ValueError(f"invalid patch token count {valid_count} for page size {P}")
+        self.patch_valid_counts[block_idx][page_id] = valid_count
+        self.kv_caches[block_idx][page_id, 0, :valid_count] = patch_k
+        self.kv_caches[block_idx][page_id, 1, :valid_count] = patch_v
 
         if len(self.scale_patch_pages[block_idx]) < self.scale_frames:
             self.scale_patch_pages[block_idx].append(page_id)

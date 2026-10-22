@@ -505,19 +505,23 @@ class AggregatorStream(AggregatorBase):
             else:
                 # FlashInfer: paged KV cache manager
                 manager = self._get_flashinfer_manager(tokens.device, tokens.dtype, tokens_per_frame=P)
-                tokens = self.global_blocks[global_idx](
-                    tokens,
-                    pos=pos,
-                    num_patches=num_patches,
-                    num_special=self.num_special_tokens,
-                    num_frames=num_frames,
-                    enable_3d_rope=self.enable_3d_rope,
-                    kv_cache=manager,
-                    global_idx=global_idx,
-                    num_frame_per_block=num_frame_per_block,
-                    num_frame_for_scale=scale_frames,
-                    num_register_tokens=self.num_register_tokens,
-                )
+                from lingbot_map.layers.attention_intervention import intervention_site
+                frame_id = manager.frame_count[global_idx]
+                grid_size = (image_height // self.patch_size, image_width // self.patch_size)
+                with intervention_site("global", global_idx, (frame_id,), self.num_special_tokens, grid_size):
+                    tokens = self.global_blocks[global_idx](
+                        tokens,
+                        pos=pos,
+                        num_patches=num_patches,
+                        num_special=self.num_special_tokens,
+                        num_frames=num_frames,
+                        enable_3d_rope=self.enable_3d_rope,
+                        kv_cache=manager,
+                        global_idx=global_idx,
+                        num_frame_per_block=num_frame_per_block,
+                        num_frame_for_scale=scale_frames,
+                        num_register_tokens=self.num_register_tokens,
+                    )
 
             global_idx += 1
             intermediates.append(tokens.view(B, S_local, P, C))
