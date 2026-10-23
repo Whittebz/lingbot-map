@@ -35,6 +35,39 @@ class AttentionInterventionTests(unittest.TestCase):
         got = select_image_tokens(24, 1.0, grid_size=(4, 6))
         self.assertEqual(got.tolist(), list(range(24)))
 
+    def test_explicit_indices_are_used_with_special_tokens_and_identity(self):
+        explicit = list(range(0, 24, 2))
+        context = AttentionKVIntervention("frame", 3, target_frame=159, keep_ratio=0.5,
+                                         image_indices=explicit)
+        with context, intervention_site("frame", 3, (159,), 3, (4, 6)):
+            special, image, _ = selection_for_site_row("frame", 0, 27)
+        self.assertEqual(special.tolist(), [0, 1, 2])
+        self.assertEqual(image.tolist(), [3 + i for i in explicit])
+        self.assertEqual(context.hit_count, 1)
+
+        identity = AttentionKVIntervention("frame", 3, target_frame=159, keep_ratio=1.0,
+                                           image_indices=list(range(24)))
+        with identity, intervention_site("frame", 3, (159,), 3, (4, 6)):
+            special, image, _ = selection_for_site_row("frame", 0, 27)
+        self.assertEqual(special.tolist(), [0, 1, 2])
+        self.assertEqual(image.tolist(), list(range(3, 27)))
+        self.assertEqual(identity.diagnostics["retained_token_count"], 24)
+
+    def test_explicit_indices_reject_invalid_lists_and_counts(self):
+        for indices in ([], [0, 0], [1.5], [True]):
+            with self.assertRaises(ValueError):
+                AttentionKVIntervention("frame", 0, keep_ratio=0.5, image_indices=indices)
+        context = AttentionKVIntervention("frame", 0, target_frame=159, keep_ratio=0.5,
+                                          image_indices=[0, 1])
+        with context, intervention_site("frame", 0, (159,), 3, (4, 6)):
+            with self.assertRaises(ValueError):
+                selection_for_site_row("frame", 0, 27)
+        out_of_range = AttentionKVIntervention("frame", 0, target_frame=159, keep_ratio=0.5,
+                                               image_indices=list(range(12))[:-1] + [24])
+        with out_of_range, intervention_site("frame", 0, (159,), 3, (4, 6)):
+            with self.assertRaises(ValueError):
+                selection_for_site_row("frame", 0, 27)
+
     def test_compaction_packs_variable_pages_and_specials(self):
         manager = FlashInferKVCacheManager.__new__(FlashInferKVCacheManager)
         manager.page_size = 4

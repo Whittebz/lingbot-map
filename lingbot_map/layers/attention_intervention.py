@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from functools import lru_cache
 from contextvars import ContextVar
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Sequence
 import torch
 
@@ -56,7 +57,7 @@ class InterventionSite:
 class AttentionKVIntervention:
     """Opt-in intervention for one attention module and absolute frame."""
     def __init__(self, kind: str, block_idx: int, target_frame: int = 159,
-                 keep_ratio: float = 0.3, retain_in_cache: bool = True):
+                 keep_ratio: float = 0.3, retain_in_cache: bool = True, image_indices=None):
         if kind not in ("frame", "global"):
             raise ValueError("kind must be frame or global")
         if block_idx < 0 or target_frame < 0:
@@ -66,6 +67,17 @@ class AttentionKVIntervention:
         self.kind, self.block_idx = kind, block_idx
         self.target_frame, self.keep_ratio = target_frame, keep_ratio
         self.retain_in_cache = retain_in_cache
+        if image_indices is not None:
+            raw_indices = tuple(image_indices)
+            if not raw_indices:
+                raise ValueError("explicit image_indices must not be empty")
+            if any(isinstance(i, bool) or not isinstance(i, Integral) for i in raw_indices):
+                raise ValueError("explicit image_indices must contain integers")
+            self.image_indices = tuple(int(i) for i in raw_indices)
+            if tuple(sorted(set(self.image_indices))) != self.image_indices:
+                raise ValueError("explicit image_indices must be unique and strictly increasing")
+        else:
+            self.image_indices = None
         self.hit_count = 0
         self.original_token_count = 0
         self.retained_token_count = 0
@@ -92,6 +104,7 @@ class AttentionKVIntervention:
             "target_attention_token_count": self.target_attention_token_count,
             "visible_kv_token_count": self.visible_kv_token_count,
             "mode": self.mode,
+            "selection_source": "explicit_image_indices" if self.image_indices is not None else "keep_ratio",
         }
 
     def __enter__(self):
@@ -120,6 +133,20 @@ def _record_selection(config, num_special: int, patch_count: int, image: torch.T
     config.attention_read_token_count = config.target_attention_token_count
 
 
+def _select_intervention_image_tokens(config, patch_count: int, grid_size, device):
+    if config.image_indices is None:
+        return select_image_tokens(patch_count, config.keep_ratio, grid_size=grid_size, device=device)
+    indices = config.image_indices
+    if any(i < 0 or i >= patch_count for i in indices):
+        raise ValueError("explicit image index is outside the image-token range")
+    expected_count = max(1, min(patch_count, int(round(patch_count * config.keep_ratio)))) if patch_count else 0
+    if len(indices) != expected_count:
+        raise ValueError("explicit image index count does not match keep_ratio: expected {}, got {}".format(expected_count, len(indices)))
+    if grid_size is not None and grid_size[0] * grid_size[1] != patch_count:
+        raise ValueError("grid_size does not match image-token count")
+    return torch.tensor(indices, dtype=torch.long, device=device)
+
+
 def active_selection(kind: str, block_idx: int, frame_idx: int, num_special: int,
                      patch_count: int, device=None):
     """Return special indices, selected image indices, and config if site matches."""
@@ -129,7 +156,7 @@ def active_selection(kind: str, block_idx: int, frame_idx: int, num_special: int
         return None
     num_special = site.num_special
     special = torch.arange(num_special, dtype=torch.long, device=device)
-    image = select_image_tokens(patch_count, config.keep_ratio, grid_size=site.grid_size, device=device) + num_special
+    image = _select_intervention_image_tokens(config, patch_count, site.grid_size, device) + num_special
     _record_selection(config, num_special, patch_count, image)
     return special, image, config
 
@@ -145,6 +172,6 @@ def selection_for_site_row(kind: str, row: int, token_count: int, device=None):
     num_special = site.num_special
     patch_count = token_count - num_special
     special = torch.arange(num_special, dtype=torch.long, device=device)
-    image = select_image_tokens(patch_count, config.keep_ratio, grid_size=site.grid_size, device=device) + num_special
+    image = _select_intervention_image_tokens(config, patch_count, site.grid_size, device) + num_special
     _record_selection(config, num_special, patch_count, image)
     return special, image, config
