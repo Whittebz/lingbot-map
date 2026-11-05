@@ -7,7 +7,7 @@
 ```bash
 # SSH 到远程
 ssh kt
-cd /home/dengbaichuan/research/lingbot_map
+cd /home/dengbaichuan/workspace/lingbot_map
 
 # 激活环境
 conda activate lingbot-map

@@ -23,7 +23,7 @@ Start with `local`, `gca`, and `global_3`. Add `zero` and `shuffle` after the pi
 
 ## Remote workflow
 
-Run commands in `/home/dengbaichuan/research/lingbot_map` on `kt`.
+Run commands in `/home/dengbaichuan/workspace/lingbot_map` on `kt`.
 
 1. Extract token files with `stage=extract`.
 2. Train the RGB decoder with `stage=train`.

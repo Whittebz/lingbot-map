@@ -8,9 +8,9 @@ GPU_RUNNER="${SCRIPT_DIR}/../utils/gpu_runner.sh"
 
 # 激活环境
 source /home/dengbaichuan/miniconda3/bin/activate lingbot-map
-export PYTHONPATH=/home/dengbaichuan/research/lingbot_map/experiments:${PYTHONPATH}
+export PYTHONPATH=/home/dengbaichuan/workspace/lingbot_map/experiments:${PYTHONPATH}
 
-cd /home/dengbaichuan/research/lingbot_map
+cd /home/dengbaichuan/workspace/lingbot_map
 
 # 场景列表
 SCENES=("loop" "courthouse" "university")

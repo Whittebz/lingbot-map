@@ -9,7 +9,7 @@ GPU_RUNNER="${SCRIPT_DIR}/../utils/gpu_runner.sh"
 
 # 激活环境
 source /home/dengbaichuan/miniconda3/bin/activate lingbot-map
-export PYTHONPATH=/home/dengbaichuan/research/lingbot_map/experiments:${PYTHONPATH}
+export PYTHONPATH=/home/dengbaichuan/workspace/lingbot_map/experiments:${PYTHONPATH}
 
 # 参数解析
 STAGE=${1:-extract}  # extract, train, eval
@@ -28,7 +28,7 @@ echo "First K: ${FIRST_K}"
 echo "Output: ${OUTPUT_DIR}"
 echo "=================================================="
 
-cd /home/dengbaichuan/research/lingbot_map
+cd /home/dengbaichuan/workspace/lingbot_map
 
 case $STAGE in
     extract)
